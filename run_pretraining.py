@@ -491,6 +491,41 @@ def main(_):
         writer.write("%s = %s\n" % (key, str(result[key])))
 
 
+def inputs_to_string(inputs, tokenizer, pred_log_probs=None):
+  import numpy as np
+
+  ids, ids_mask, masked_ids, masked_positions, \
+      masked_ids_mask, next_sent_pred, seg_type_ids = inputs
+
+  assert all(x.ndim == inputs[0].ndim for x in inputs)
+
+  if ids.ndim == 1:
+    assert len(ids) == len(ids_mask) == len(seg_type_ids)
+    ids_len = np.count_nonzero(ids_mask)
+    assert all(ids_mask[:ids_len] == 1)
+    masked_ids_len = np.count_nonzero(masked_ids_mask)
+    assert all(masked_ids_mask[:masked_ids_len] == 1)
+
+    masks = {}
+    masked_tokens = tokenizer.convert_ids_to_tokens(masked_ids)
+    for i in range(masked_ids_len):
+      masks[masked_positions[i]] = masked_tokens[i]
+
+    tokens = tokenizer.convert_ids_to_tokens(ids)
+    for i in range(len(tokens)):
+      if i in masks:
+        tokens[i] += "/" + masks[i]
+
+    return " ".join(tokens)
+
+  elif ids.ndim == 2:
+    result = []
+    for b in range(len(ids)):
+      _inputs = [x[0] for x in inputs]
+      result.append(inputs_to_string(_inputs, tokenizer))
+    return result
+
+
 if __name__ == "__main__":
   flags.mark_flag_as_required("input_file")
   flags.mark_flag_as_required("bert_config_file")
