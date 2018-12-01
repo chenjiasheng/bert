@@ -12,12 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Run masked LM/next sentence masked_lm pre-training for BERT."""
+#"""Run masked LM/next sentence masked_lm pre-training for BERT."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
 import os
 import modeling
 import optimization
@@ -137,7 +136,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         use_one_hot_embeddings=use_one_hot_embeddings)
 
     (masked_lm_loss,
-     masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
+     masked_lm_example_loss, masked_lm_log_probs) = \
+      get_masked_lm_output(
          bert_config, model.get_sequence_output(), model.get_embedding_table(),
          masked_lm_positions, masked_lm_ids, masked_lm_weights)
 
@@ -188,29 +188,30 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                     masked_lm_weights, next_sentence_example_loss,
                     next_sentence_log_probs, next_sentence_labels):
         """Computes the loss and accuracy of the model."""
-        masked_lm_log_probs = tf.reshape(masked_lm_log_probs,
-                                         [-1, masked_lm_log_probs.shape[-1]])
-        masked_lm_predictions = tf.argmax(
-            masked_lm_log_probs, axis=-1, output_type=tf.int32)
-        masked_lm_example_loss = tf.reshape(masked_lm_example_loss, [-1])
-        masked_lm_ids = tf.reshape(masked_lm_ids, [-1])
-        masked_lm_weights = tf.reshape(masked_lm_weights, [-1])
-        masked_lm_accuracy = tf.metrics.accuracy(
-            labels=masked_lm_ids,
-            predictions=masked_lm_predictions,
-            weights=masked_lm_weights)
-        masked_lm_mean_loss = tf.metrics.mean(
-            values=masked_lm_example_loss, weights=masked_lm_weights)
+        with tf.name_scope("metric"):
+          masked_lm_log_probs = tf.reshape(masked_lm_log_probs,
+                                           [-1, masked_lm_log_probs.shape[-1]])
+          masked_lm_predictions = tf.argmax(
+              masked_lm_log_probs, axis=-1, output_type=tf.int32)
+          masked_lm_example_loss = tf.reshape(masked_lm_example_loss, [-1])
+          masked_lm_ids = tf.reshape(masked_lm_ids, [-1])
+          masked_lm_weights = tf.reshape(masked_lm_weights, [-1])
+          masked_lm_accuracy = tf.metrics.accuracy(
+              labels=masked_lm_ids,
+              predictions=masked_lm_predictions,
+              weights=masked_lm_weights)
+          masked_lm_mean_loss = tf.metrics.mean(
+              values=masked_lm_example_loss, weights=masked_lm_weights)
 
-        next_sentence_log_probs = tf.reshape(
-            next_sentence_log_probs, [-1, next_sentence_log_probs.shape[-1]])
-        next_sentence_predictions = tf.argmax(
-            next_sentence_log_probs, axis=-1, output_type=tf.int32)
-        next_sentence_labels = tf.reshape(next_sentence_labels, [-1])
-        next_sentence_accuracy = tf.metrics.accuracy(
-            labels=next_sentence_labels, predictions=next_sentence_predictions)
-        next_sentence_mean_loss = tf.metrics.mean(
-            values=next_sentence_example_loss)
+          next_sentence_log_probs = tf.reshape(
+              next_sentence_log_probs, [-1, next_sentence_log_probs.shape[-1]])
+          next_sentence_predictions = tf.argmax(
+              next_sentence_log_probs, axis=-1, output_type=tf.int32)
+          next_sentence_labels = tf.reshape(next_sentence_labels, [-1])
+          next_sentence_accuracy = tf.metrics.accuracy(
+              labels=next_sentence_labels, predictions=next_sentence_predictions)
+          next_sentence_mean_loss = tf.metrics.mean(
+              values=next_sentence_example_loss)
 
         return {
             "masked_lm_accuracy": masked_lm_accuracy,
@@ -306,19 +307,20 @@ def get_next_sentence_output(bert_config, input_tensor, labels):
 
 
 def gather_indexes(sequence_tensor, positions):
-  """Gathers the vectors at the specific positions over a minibatch."""
-  sequence_shape = modeling.get_shape_list(sequence_tensor, expected_rank=3)
-  batch_size = sequence_shape[0]
-  seq_length = sequence_shape[1]
-  width = sequence_shape[2]
+  with tf.name_scope("gather_indexes"):
+    """Gathers the vectors at the specific positions over a minibatch."""
+    sequence_shape = modeling.get_shape_list(sequence_tensor, expected_rank=3)
+    batch_size = sequence_shape[0]
+    seq_length = sequence_shape[1]
+    width = sequence_shape[2]
 
-  flat_offsets = tf.reshape(
-      tf.range(0, batch_size, dtype=tf.int32) * seq_length, [-1, 1])
-  flat_positions = tf.reshape(positions + flat_offsets, [-1])
-  flat_sequence_tensor = tf.reshape(sequence_tensor,
-                                    [batch_size * seq_length, width])
-  output_tensor = tf.gather(flat_sequence_tensor, flat_positions)
-  return output_tensor
+    flat_offsets = tf.reshape(
+        tf.range(0, batch_size, dtype=tf.int32) * seq_length, [-1, 1])
+    flat_positions = tf.reshape(positions + flat_offsets, [-1])
+    flat_sequence_tensor = tf.reshape(sequence_tensor,
+                                      [batch_size * seq_length, width])
+    output_tensor = tf.gather(flat_sequence_tensor, flat_positions)
+    return output_tensor
 
 
 def input_fn_builder(input_files,
