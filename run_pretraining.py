@@ -477,8 +477,11 @@ def main(_):
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         is_training=False)
 
+    from tensorflow.python import debug as tf_debug
+    # hooks = []
+    hooks = [tf_debug.LocalCLIDebugHook(ui_type="readline")]
     result = estimator.evaluate(
-        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
+        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps, hooks=hooks)
 
     output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
     with tf.gfile.GFile(output_eval_file, "w") as writer:
