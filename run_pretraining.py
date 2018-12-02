@@ -21,6 +21,7 @@ import os
 import modeling
 import optimization
 import tensorflow as tf
+import numpy as np
 
 flags = tf.flags
 
@@ -59,6 +60,8 @@ flags.DEFINE_integer(
 flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
+
+flags.DEFINE_bool("do_predict", False, "Whether to run predict on the dev set.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -230,6 +233,33 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
           loss=total_loss,
           eval_metrics=eval_metrics,
           scaffold_fn=scaffold_fn)
+
+    elif mode == tf.estimator.ModeKeys.PREDICT:
+      """Computes the loss and accuracy of the model."""
+      with tf.name_scope("predict"):
+        masked_lm_log_probs = tf.reshape(
+          masked_lm_log_probs, (-1, FLAGS.max_predictions_per_seq, masked_lm_log_probs.shape[-1]))
+        masked_lm_predictions = tf.argmax(
+          masked_lm_log_probs, axis=-1, output_type=tf.int32)
+
+        next_sentence_predictions = tf.argmax(
+          next_sentence_log_probs, axis=-1, output_type=tf.int32)
+
+      predictions =  {
+        "input_ids": input_ids,
+        "input_mask": input_mask,
+        "masked_lm_positions": masked_lm_positions,
+        "masked_lm_ids": masked_lm_ids,
+        "masked_lm_weights": masked_lm_weights,
+        "masked_lm_log_probs": masked_lm_log_probs,
+        "masked_lm_predictions": masked_lm_predictions,
+        "next_sentence_predictions": next_sentence_predictions,
+      }
+
+      output_spec = tf.estimator.EstimatorSpec(
+        mode=mode,
+        loss=total_loss,
+        predictions=predictions)
     else:
       raise ValueError("Only TRAIN and EVAL modes are supported: %s" % (mode))
 
@@ -330,9 +360,9 @@ def input_fn_builder(input_files,
                      num_cpu_threads=4):
   """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
-  def input_fn(params):
+  def input_fn(params=None):
     """The actual input function."""
-    batch_size = params["batch_size"]
+    batch_size = params["batch_size"] if params else 1
 
     name_to_features = {
         "input_ids":
@@ -408,8 +438,8 @@ def _decode_record(record, name_to_features):
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  if not FLAGS.do_train and not FLAGS.do_eval:
-    raise ValueError("At least one of `do_train` or `do_eval` must be True.")
+  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+    raise ValueError("At least one of `do_train`, `do_eval` or `do_predict` must be True.")
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
@@ -490,41 +520,82 @@ def main(_):
         tf.logging.info("  %s = %s", key, str(result[key]))
         writer.write("%s = %s\n" % (key, str(result[key])))
 
+  if FLAGS.do_predict:
+    tf.logging.info("***** Running predict *****")
+    tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
-def inputs_to_string(inputs, tokenizer, pred_log_probs=None):
-  import numpy as np
+    predict_input_fn = input_fn_builder(
+      input_files=input_files,
+      max_seq_length=FLAGS.max_seq_length,
+      max_predictions_per_seq=FLAGS.max_predictions_per_seq,
+      is_training=False)
 
-  ids, ids_mask, masked_ids, masked_positions, \
-      masked_ids_mask, next_sent_pred, seg_type_ids = inputs
+    predict_estimator = tf.estimator.Estimator(
+      model_fn=model_fn,
+      config=run_config)
 
-  assert all(x.ndim == inputs[0].ndim for x in inputs)
+    result_generator = predict_estimator.predict(input_fn=predict_input_fn)
+    for i in range(10):
+      result = next(result_generator)
+      print_predict_result(result)
+      print("====================")
 
-  if ids.ndim == 1:
-    assert len(ids) == len(ids_mask) == len(seg_type_ids)
-    ids_len = np.count_nonzero(ids_mask)
-    assert all(ids_mask[:ids_len] == 1)
-    masked_ids_len = np.count_nonzero(masked_ids_mask)
-    assert all(masked_ids_mask[:masked_ids_len] == 1)
 
-    masks = {}
-    masked_tokens = tokenizer.convert_ids_to_tokens(masked_ids)
-    for i in range(masked_ids_len):
-      masks[masked_positions[i]] = masked_tokens[i]
+def print_predict_result(result):
+  def convert_ids_to_tokens(ids):
+    import tokenization
+    if not hasattr(convert_ids_to_tokens, "tokenizer"):
+      convert_ids_to_tokens.tokenizer = tokenization.FullTokenizer(
+        vocab_file="/home/chenjiasheng/code/bert/data/chinese_L-12_H-768_A-12/vocab.txt")
+    def id_to_token(id):
+      if id == 101: return ""
+      elif id == 102: return "//"
+      elif id == 103: return "*"
+      else: return convert_ids_to_tokens.tokenizer.inv_vocab[id]
+    return [id_to_token(x) for x in ids]
 
-    tokens = tokenizer.convert_ids_to_tokens(ids)
-    for i in range(len(tokens)):
-      if i in masks:
-        tokens[i] += "/" + masks[i]
+  input_ids = result["input_ids"]
+  input_mask = result["input_mask"]
+  masked_lm_positions = result["masked_lm_positions"]
+  masked_lm_ids = result["masked_lm_ids"]
+  masked_lm_weights = result["masked_lm_weights"]
+  masked_lm_log_probs = result["masked_lm_log_probs"]
+  masked_lm_predictions = result["masked_lm_predictions"]
+  next_sentence_predictions = result["next_sentence_predictions"]
 
-    return " ".join(tokens)
 
-  elif ids.ndim == 2:
-    result = []
-    for b in range(len(ids)):
-      _inputs = [x[0] for x in inputs]
-      result.append(inputs_to_string(_inputs, tokenizer))
-    return result
+  ids_len = np.count_nonzero(input_mask)
+  masked_ids_len = np.count_nonzero(masked_lm_weights)
+  input_ids = input_ids[:ids_len]
+  masked_lm_positions = masked_lm_positions[:masked_ids_len]
+  masked_lm_ids = masked_lm_ids[:masked_ids_len]
+  masked_lm_log_probs = masked_lm_log_probs[:masked_ids_len]
+  masked_lm_predictions = masked_lm_predictions[:masked_ids_len]
 
+  tokens = convert_ids_to_tokens(input_ids[:ids_len])
+  masked_ids_dict = {masked_lm_positions[i]: masked_lm_ids[i] for i in range(masked_ids_len)}
+  predict_ids_dict = {masked_lm_positions[i]: masked_lm_predictions[i] for i in range(masked_ids_len)}
+  masked_tokens = convert_ids_to_tokens(masked_lm_ids[:masked_ids_len])
+  predict_tokens = convert_ids_to_tokens(masked_lm_predictions[:masked_ids_len])
+
+  GUESS_CNT = 5
+  guess = np.argpartition(masked_lm_log_probs, -np.arange(GUESS_CNT))[:, -GUESS_CNT:][:, ::-1]
+  guess_prob = [[masked_lm_log_probs[i][guess[i][j]] for j in range(GUESS_CNT)] for i in range(masked_ids_len)]
+
+  j = 0
+  for i in range(ids_len):
+    if i in masked_lm_positions:
+      tokens[i] = convert_ids_to_tokens([masked_ids_dict[i]])[0]
+      tokens[i] += "("
+      tokens[i] += "%.3f" % -masked_lm_log_probs[j][masked_ids_dict[i]]
+      tokens[i] += "|"
+      for id in guess[j]:
+        tokens[i] += convert_ids_to_tokens([id])[0]
+      tokens[i] += ")"
+
+      j += 1
+
+  print("".join(tokens))
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("input_file")
