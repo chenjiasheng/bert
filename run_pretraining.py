@@ -22,6 +22,7 @@ import modeling
 import optimization
 import tensorflow as tf
 import numpy as np
+from tensorflow.python import debug as tf_debug
 
 flags = tf.flags
 
@@ -62,6 +63,8 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
 flags.DEFINE_bool("do_predict", False, "Whether to run predict on the dev set.")
+
+flags.DEFINE_string("vocab_file", "data/chinese_L-12_H-768_A-12/vocab.txt", "Vocab file.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -353,15 +356,140 @@ def gather_indexes(sequence_tensor, positions):
     return output_tensor
 
 
+def predict_input_fn(input_files,
+                     max_seq_length,
+                     max_predictions_per_seq,
+                     mode,
+                     num_cpu_threads=4):
+  def stdin_gen():
+    max_seq_length = FLAGS.max_seq_length
+    max_predictions_per_seq = FLAGS.max_predictions_per_seq
+    from tokenization import FullTokenizer
+    if not hasattr(stdin_gen, "tokenizer"):
+      stdin_gen.tokenizer = FullTokenizer(
+        vocab_file=FLAGS.vocab_file)
+
+    if FLAGS.input_file:
+      file = open(FLAGS.input_file, encoding="utf-8")
+    else:
+      import readline
+      readline.parse_and_bind('tab: complete')
+      readline.parse_and_bind('set editing-mode vi')
+
+    # for user_input in file:
+    while True:
+      try:
+        if not FLAGS.input_file:
+          user_input = input("Input sentence: ")
+        else:
+          user_input = file.readline()
+        user_input = user_input.strip().replace("×", "*")
+
+        _input_ids = np.zeros(max_seq_length, dtype=np.int32)
+        _input_mask = np.zeros(max_seq_length, dtype=np.int32)
+        _segment_ids = np.zeros(max_seq_length, dtype=np.int32)
+        _masked_lm_positions = np.zeros(max_predictions_per_seq, dtype=np.int32)
+        _masked_lm_ids = np.zeros(max_predictions_per_seq, dtype=np.int32)
+        _masked_lm_weights = np.zeros(max_predictions_per_seq, dtype=np.float32)
+        _next_sentence_labels = np.zeros(1, dtype=np.int32)
+
+        if len(user_input) == 0:
+          continue
+
+        masked_positions = []
+        pos = 0
+        while True:
+          pos = user_input.find("*", pos + 1)
+          if pos == -1:
+            break
+          masked_positions.append(pos)
+        masked_positions = [masked_positions[i] - i - 1 for i in range(len(masked_positions))]
+        if len(masked_positions) == 0 or any(x < 0 for x in masked_positions):
+          print("Error: Invalid masked positions.")
+          continue
+
+        sentence = user_input.replace("*", "")
+        tokens = stdin_gen.tokenizer.tokenize(sentence)
+        if len(sentence) != len(tokens):
+          print("Error: Invalid input '%s', supports only chinese." % user_input)
+          continue
+        if len(sentence) > max_seq_length - 2:
+          print("Error: Invalid input '%s', sequence_length(=%d) > max_seq_length-2(=%d)."
+                % (user_input, len(sentence), max_seq_length - 2))
+          continue
+
+        ids = stdin_gen.tokenizer.convert_tokens_to_ids(tokens)
+
+        masked_ids = []
+        for pos in masked_positions:
+          masked_ids.append(ids[pos])
+          ids[pos] = 103
+        masked_positions = np.asarray(masked_positions) + 1
+        ids = [101] + ids
+
+        _input_ids[:len(ids)] = ids
+        _input_mask[:len(ids)] = 1
+        _masked_lm_positions[:len(masked_positions)] = masked_positions
+        _masked_lm_ids[:len(masked_positions)] = masked_ids
+        _masked_lm_weights[:len(masked_positions)] = 1.0
+
+        result = {"input_ids": _input_ids,
+                  "input_mask": _input_mask,
+                  "segment_ids": _segment_ids,
+                  "masked_lm_positions": _masked_lm_positions,
+                  "masked_lm_ids": _masked_lm_ids,
+                  "masked_lm_weights": _masked_lm_weights,
+                  "next_sentence_labels": _next_sentence_labels}
+        yield result
+      except EOFError:
+        print()
+        break
+      except:
+        print("Error: Invalid inputs.")
+        continue
+
+  output_types = {"input_ids": tf.int32,
+                  "input_mask": tf.int32,
+                  "segment_ids": tf.int32,
+                  "masked_lm_positions": tf.int32,
+                  "masked_lm_ids": tf.int32,
+                  "masked_lm_weights": tf.float32,
+                  "next_sentence_labels": tf.int32}
+
+  output_shapes = {"input_ids": [max_seq_length],
+                   "input_mask": [max_seq_length],
+                   "segment_ids": [max_seq_length],
+                   "masked_lm_positions": [max_predictions_per_seq],
+                   "masked_lm_ids": [max_predictions_per_seq],
+                   "masked_lm_weights": [max_predictions_per_seq],
+                   "next_sentence_labels": [1]}
+
+  d = tf.data.Dataset.from_generator(generator=stdin_gen,
+                                     output_types=output_types,
+                                     output_shapes=output_shapes)
+  d = d.batch(batch_size=1)
+  return d
+
+
 def input_fn_builder(input_files,
                      max_seq_length,
                      max_predictions_per_seq,
-                     is_training,
+                     mode,
                      num_cpu_threads=4):
   """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
+  assert mode in ["train", "eval", "predict"]
+
   def input_fn(params=None):
     """The actual input function."""
+    if mode == "predict":
+      return predict_input_fn(input_files,
+                     max_seq_length,
+                     max_predictions_per_seq,
+                     mode,
+                     num_cpu_threads=4)
+
+
     batch_size = params["batch_size"] if params else 1
 
     name_to_features = {
@@ -383,7 +511,7 @@ def input_fn_builder(input_files,
 
     # For training, we want a lot of parallel reading and shuffling.
     # For eval, we want no shuffling and parallel reading doesn't matter.
-    if is_training:
+    if mode == "train":
       d = tf.data.Dataset.from_tensor_slices(tf.constant(input_files))
       d = d.repeat()
       d = d.shuffle(buffer_size=len(input_files))
@@ -396,7 +524,7 @@ def input_fn_builder(input_files,
       d = d.apply(
           tf.contrib.data.parallel_interleave(
               tf.data.TFRecordDataset,
-              sloppy=is_training,
+              sloppy=True,
               cycle_length=cycle_length))
       d = d.shuffle(buffer_size=100)
     else:
@@ -494,7 +622,7 @@ def main(_):
         input_files=input_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-        is_training=True)
+        mode="train")
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
   if FLAGS.do_eval:
@@ -505,13 +633,9 @@ def main(_):
         input_files=input_files,
         max_seq_length=FLAGS.max_seq_length,
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-        is_training=False)
+        mode="eval")
 
-    from tensorflow.python import debug as tf_debug
-    # hooks = []
-    hooks = [tf_debug.LocalCLIDebugHook(ui_type="readline")]
-    result = estimator.evaluate(
-        input_fn=eval_input_fn, steps=FLAGS.max_eval_steps, hooks=hooks)
+    result = estimator.evaluate(input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
 
     output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
     with tf.gfile.GFile(output_eval_file, "w") as writer:
@@ -528,15 +652,18 @@ def main(_):
       input_files=input_files,
       max_seq_length=FLAGS.max_seq_length,
       max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-      is_training=False)
+      mode="predict")
 
     predict_estimator = tf.estimator.Estimator(
       model_fn=model_fn,
       config=run_config)
 
-    result_generator = predict_estimator.predict(input_fn=predict_input_fn)
-    for i in range(10):
-      result = next(result_generator)
+    hooks = [tf_debug.LocalCLIDebugHook(ui_type="readline")]
+    result_generator = predict_estimator.predict(
+      input_fn=predict_input_fn,
+      # hooks=hooks
+    )
+    for result in result_generator:
       print_predict_result(result)
       print("====================")
 
@@ -546,7 +673,7 @@ def print_predict_result(result):
     import tokenization
     if not hasattr(convert_ids_to_tokens, "tokenizer"):
       convert_ids_to_tokens.tokenizer = tokenization.FullTokenizer(
-        vocab_file="/home/chenjiasheng/code/bert/data/chinese_L-12_H-768_A-12/vocab.txt")
+        vocab_file=FLAGS.vocab_file)
     def id_to_token(id):
       if id == 101: return ""
       elif id == 102: return "//"
@@ -580,7 +707,6 @@ def print_predict_result(result):
 
   GUESS_CNT = 5
   guess = np.argpartition(masked_lm_log_probs, -np.arange(GUESS_CNT))[:, -GUESS_CNT:][:, ::-1]
-  guess_prob = [[masked_lm_log_probs[i][guess[i][j]] for j in range(GUESS_CNT)] for i in range(masked_ids_len)]
 
   j = 0
   for i in range(ids_len):
