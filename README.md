@@ -828,6 +828,13 @@ Note that since our `sample_text.txt` file is very small, this example training
 will overfit that data in only a few steps and produce unrealistically high
 accuracy numbers.
 
+Here is how to run predict of the pre-trained Chinese mask language model interactively. 
+Replace `input_file` with a text file to read input from a file.
+
+```shell
+python run_pretraining.py --input_file ''  --output_dir results/ --bert_config_file data/chinese_L-12_H-768_A-12/bert_config.json --do_predict True --vocab_file data/chinese_L-12_H-768_A-12/vocab.txt --init_checkpoint data/chinese_L-12_H-768_A-12/bert_model.ckpt
+```
+
 ### Pre-training tips and caveats
 
 *   **If using your own vocabulary, make sure to change `vocab_size` in
