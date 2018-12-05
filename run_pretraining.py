@@ -64,20 +64,25 @@ flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
 flags.DEFINE_bool("do_predict", False, "Whether to run predict on the input_file/stdin.")
 
-"""
-python run_pretraining.py --input_file ''  --output_dir results/ 
---bert_config_file data/chinese_L-12_H-768_A-12/cn_bert_config.json 
---do_predict True --vocab_file data/chinese_L-12_H-768_A-12/cn_vocab.txt 
---original_vocab_file data/chinese_L-12_H-768_A-12/vocab.txt  
---init_checkpoint data/chinese_L-12_H-768_A-12/bert_model.ckpt
-"""
-flags.DEFINE_string("original_vocab_file", "", "Original vocab file. If provided and do_predict is True, "
-                                               "the word embedding and output bias of the mask lm will "
-                                               "be picked from the init_checkpoint according the two "
-                                               "vocab files, and the new weights will be saved to "
-                                               "{init_checkpoint}.transfered checkpoint. This useful to "
-                                               "extract a mask lm model with a subset vocab from the pre-trained "
-                                               "model with an original large vocab. ")
+flags.DEFINE_string("full_vocab_file", "",
+                    "Original vocab file. If provided and do_predict is True, the word embedding and output bias of "
+                    "the mask lm will be picked from the init_checkpoint according the two vocab files, and the new "
+                    "weights will be saved to {init_checkpoint}.downsampled checkpoint. This useful to down-sampling "
+                    "a mask lm model with a subset vocab from the pre-trained model with an original full vocab. "
+                    
+                    "This will do down-sampling: \
+                     python run_pretraining.py --do_predict True --input_file ''  --output_dir results/ \
+                     --bert_config_file data/chinese_L-12_H-768_A-12/cn_bert_config.json \
+                     --vocab_file data/chinese_L-12_H-768_A-12/cn_vocab.txt \
+                     --full_vocab_file data/chinese_L-12_H-768_A-12/vocab.txt \
+                     --init_checkpoint data/chinese_L-12_H-768_A-12/bert_model.ckpt "
+                    
+                    "And then use the new down-sampled checkpoint next: \
+                     python run_pretraining.py --do_predict True --input_file ''  --output_dir results/ \
+                     --bert_config_file data/chinese_L-12_H-768_A-12/cn_bert_config.json \
+                     --vocab_file data/chinese_L-12_H-768_A-12/cn_vocab.txt \
+                     --init_checkpoint data/chinese_L-12_H-768_A-12/bert_model.ckpt.downsampled"
+                    )
 
 
 flags.DEFINE_string("vocab_file", "data/chinese_L-12_H-768_A-12/cn_vocab.txt", "Vocab file.")
@@ -130,7 +135,7 @@ flags.DEFINE_integer(
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
                      use_one_hot_embeddings,
-                     old_vocab_file=None, new_vocab_file=None):
+                     full_vocab_file=None, subset_vocab_file=None):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -176,16 +181,16 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     scaffold_fn = None
     if init_checkpoint:
       # replace the embeddngs weights
-      if old_vocab_file:
-        def pick_sub_set(embeddings, old_vocab_file, new_vocab_file):
-          old_vocab = [line.strip() for line in open(old_vocab_file, encoding='utf-8')]
+      if full_vocab_file:
+        def pick_sub_set(embeddings, full_vocab_file, new_vocab_file):
+          old_vocab = [line.strip() for line in open(full_vocab_file, encoding='utf-8')]
           old_vocab_inv = {old_vocab[i]: i for i in range(len(old_vocab))}
           _new_vocab = [line.strip() for line in open(new_vocab_file, encoding='utf-8')]
           if len(_new_vocab) != len(set(_new_vocab)):
             tf.logging.ERROR("Dupllicated entries in %s." % new_vocab_file)
           new_vocab = [x for x in _new_vocab if x in old_vocab_inv]
           if len(new_vocab) != len(_new_vocab):
-            tf.logging.ERROR("Threre are OOVs in %s that not in %s. " % (new_vocab_file, old_vocab_file))
+            tf.logging.ERROR("Threre are OOVs in %s that not in %s. " % (new_vocab_file, full_vocab_file))
           ids = [old_vocab_inv[c] for c in new_vocab]
           return np.asarray([embeddings[x] for x in ids])
         from tensorflow.python.training import checkpoint_utils
@@ -197,7 +202,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         for v in [v1, v2]:
           with tf.device(v.device), tf.device("/cpu:0"):
             constant_op = tf.constant(pick_sub_set(checkpoint_utils.load_variable(init_checkpoint, v.op.name),
-                                                   old_vocab_file, new_vocab_file))
+                                                   full_vocab_file, subset_vocab_file))
             v._initializer_op = v.assign(constant_op)
             v._initial_value = constant_op
 
@@ -418,12 +423,13 @@ def predict_input_fn(input_files,
       import readline
       readline.parse_and_bind('tab: complete')
       readline.parse_and_bind('set editing-mode vi')
+      print("Input your sentence, mask out characters by a following \'*\' or \'×\':")
 
     # for user_input in file:
     while True:
       try:
         if not FLAGS.input_file:
-          user_input = input("Input sentence: ")
+          user_input = input("input:")
         else:
           user_input = file.readline()
         user_input = user_input.strip().replace("×", "*")
@@ -525,7 +531,7 @@ def input_fn_builder(input_files,
 
   def input_fn(params=None):
     """The actual input function."""
-    if mode == "predict" or mode == "transfer":
+    if mode == "predict":
       return predict_input_fn(input_files,
                      max_seq_length,
                      max_predictions_per_seq,
@@ -647,8 +653,8 @@ def main(_):
       num_warmup_steps=FLAGS.num_warmup_steps,
       use_tpu=FLAGS.use_tpu,
       use_one_hot_embeddings=FLAGS.use_tpu,
-      old_vocab_file=FLAGS.original_vocab_file,
-      new_vocab_file=FLAGS.vocab_file
+      full_vocab_file=FLAGS.full_vocab_file,
+      subset_vocab_file=FLAGS.vocab_file
   )
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
@@ -705,14 +711,14 @@ def main(_):
 
     hooks = []
     # hooks.append(tf_debug.LocalCLIDebugHook(ui_type="readline"))
-    if FLAGS.original_vocab_file:
+    if FLAGS.full_vocab_file:
       class SaveTransferedWeightsHook(tf.train.SessionRunHook):
         def begin(self):
           self.saver = tf.train.Saver()
         def after_create_session(self, session, coord):
-          save_path = FLAGS.init_checkpoint + ".transfered"
-          self.saver.save(session, FLAGS.init_checkpoint + ".transfered")
-          print("Done saving transfered weights to %s." % save_path)
+          save_path = FLAGS.init_checkpoint + ".downsampled"
+          self.saver.save(session, FLAGS.init_checkpoint + ".downsampled")
+          print("Done saving down-sampled weights to %s." % save_path)
         def end(self, session):
           del self.saver
       hooks.append(SaveTransferedWeightsHook())
