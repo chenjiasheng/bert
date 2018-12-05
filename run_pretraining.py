@@ -62,9 +62,25 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
-flags.DEFINE_bool("do_predict", False, "Whether to run predict on the dev set.")
+flags.DEFINE_bool("do_predict", False, "Whether to run predict on the input_file/stdin.")
 
-flags.DEFINE_string("vocab_file", "data/chinese_L-12_H-768_A-12/vocab.txt", "Vocab file.")
+"""
+python run_pretraining.py --input_file ''  --output_dir results/ 
+--bert_config_file data/chinese_L-12_H-768_A-12/cn_bert_config.json 
+--do_predict True --vocab_file data/chinese_L-12_H-768_A-12/cn_vocab.txt 
+--original_vocab_file data/chinese_L-12_H-768_A-12/vocab.txt  
+--init_checkpoint data/chinese_L-12_H-768_A-12/bert_model.ckpt
+"""
+flags.DEFINE_string("original_vocab_file", "", "Original vocab file. If provided and do_predict is True, "
+                                               "the word embedding and output bias of the mask lm will "
+                                               "be picked from the init_checkpoint according the two "
+                                               "vocab files, and the new weights will be saved to "
+                                               "{init_checkpoint}.transfered checkpoint. This useful to "
+                                               "extract a mask lm model with a subset vocab from the pre-trained "
+                                               "model with an original large vocab. ")
+
+
+flags.DEFINE_string("vocab_file", "data/chinese_L-12_H-768_A-12/cn_vocab.txt", "Vocab file.")
 
 flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 
@@ -113,7 +129,8 @@ flags.DEFINE_integer(
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings,
+                     old_vocab_file=None, new_vocab_file=None):
   """Returns `model_fn` closure for TPUEstimator."""
 
   def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -142,7 +159,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         use_one_hot_embeddings=use_one_hot_embeddings)
 
     (masked_lm_loss,
-     masked_lm_example_loss, masked_lm_log_probs) = \
+     masked_lm_example_loss, masked_lm_log_probs, output_bias) = \
       get_masked_lm_output(
          bert_config, model.get_sequence_output(), model.get_embedding_table(),
          masked_lm_positions, masked_lm_ids, masked_lm_weights)
@@ -158,6 +175,32 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     initialized_variable_names = {}
     scaffold_fn = None
     if init_checkpoint:
+      # replace the embeddngs weights
+      if old_vocab_file:
+        def pick_sub_set(embeddings, old_vocab_file, new_vocab_file):
+          old_vocab = [line.strip() for line in open(old_vocab_file, encoding='utf-8')]
+          old_vocab_inv = {old_vocab[i]: i for i in range(len(old_vocab))}
+          _new_vocab = [line.strip() for line in open(new_vocab_file, encoding='utf-8')]
+          if len(_new_vocab) != len(set(_new_vocab)):
+            tf.logging.ERROR("Dupllicated entries in %s." % new_vocab_file)
+          new_vocab = [x for x in _new_vocab if x in old_vocab_inv]
+          if len(new_vocab) != len(_new_vocab):
+            tf.logging.ERROR("Threre are OOVs in %s that not in %s. " % (new_vocab_file, old_vocab_file))
+          ids = [old_vocab_inv[c] for c in new_vocab]
+          return np.asarray([embeddings[x] for x in ids])
+        from tensorflow.python.training import checkpoint_utils
+        ckpt_variables = dict(checkpoint_utils.list_variables(init_checkpoint))
+        v1 = model.embedding_table
+        v2 = output_bias
+
+        tvars = [x for x in tvars if x.name not in [v1.name, v2.name]]
+        for v in [v1, v2]:
+          with tf.device(v.device), tf.device("/cpu:0"):
+            constant_op = tf.constant(pick_sub_set(checkpoint_utils.load_variable(init_checkpoint, v.op.name),
+                                                   old_vocab_file, new_vocab_file))
+            v._initializer_op = v.assign(constant_op)
+            v._initial_value = constant_op
+
       (assignment_map, initialized_variable_names
       ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
       if use_tpu:
@@ -313,7 +356,7 @@ def get_masked_lm_output(bert_config, input_tensor, output_weights, positions,
     denominator = tf.reduce_sum(label_weights) + 1e-5
     loss = numerator / denominator
 
-  return (loss, per_example_loss, log_probs)
+  return (loss, per_example_loss, log_probs, output_bias)
 
 
 def get_next_sentence_output(bert_config, input_tensor, labels):
@@ -482,13 +525,12 @@ def input_fn_builder(input_files,
 
   def input_fn(params=None):
     """The actual input function."""
-    if mode == "predict":
+    if mode == "predict" or mode == "transfer":
       return predict_input_fn(input_files,
                      max_seq_length,
                      max_predictions_per_seq,
                      mode,
                      num_cpu_threads=4)
-
 
     batch_size = params["batch_size"] if params else 1
 
@@ -566,7 +608,7 @@ def _decode_record(record, name_to_features):
 def main(_):
   tf.logging.set_verbosity(tf.logging.INFO)
 
-  if not FLAGS.do_train and not FLAGS.do_eval and not FLAGS.do_predict:
+  if not any([FLAGS.do_train, FLAGS.do_eval, FLAGS.do_predict]):
     raise ValueError("At least one of `do_train`, `do_eval` or `do_predict` must be True.")
 
   bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
@@ -604,7 +646,10 @@ def main(_):
       num_train_steps=FLAGS.num_train_steps,
       num_warmup_steps=FLAGS.num_warmup_steps,
       use_tpu=FLAGS.use_tpu,
-      use_one_hot_embeddings=FLAGS.use_tpu)
+      use_one_hot_embeddings=FLAGS.use_tpu,
+      old_vocab_file=FLAGS.original_vocab_file,
+      new_vocab_file=FLAGS.vocab_file
+  )
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
@@ -658,10 +703,23 @@ def main(_):
       model_fn=model_fn,
       config=run_config)
 
-    hooks = [tf_debug.LocalCLIDebugHook(ui_type="readline")]
+    hooks = []
+    # hooks.append(tf_debug.LocalCLIDebugHook(ui_type="readline"))
+    if FLAGS.original_vocab_file:
+      class SaveTransferedWeightsHook(tf.train.SessionRunHook):
+        def begin(self):
+          self.saver = tf.train.Saver()
+        def after_create_session(self, session, coord):
+          save_path = FLAGS.init_checkpoint + ".transfered"
+          self.saver.save(session, FLAGS.init_checkpoint + ".transfered")
+          print("Done saving transfered weights to %s." % save_path)
+        def end(self, session):
+          del self.saver
+      hooks.append(SaveTransferedWeightsHook())
+
     result_generator = predict_estimator.predict(
       input_fn=predict_input_fn,
-      # hooks=hooks
+      hooks=hooks
     )
     for result in result_generator:
       print_predict_result(result)
