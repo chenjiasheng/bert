@@ -35,7 +35,7 @@ flags.DEFINE_string(
     "This specifies the model architecture.")
 
 flags.DEFINE_string(
-    "input_file", None,
+    "input_file", '',
     "Input TF example files (can be a glob or comma separated).")
 
 flags.DEFINE_string(
@@ -404,7 +404,7 @@ def gather_indexes(sequence_tensor, positions):
     return output_tensor
 
 
-def predict_input_fn(input_files,
+def _predict_input_fn(input_files,
                      max_seq_length,
                      max_predictions_per_seq,
                      mode,
@@ -532,7 +532,7 @@ def input_fn_builder(input_files,
   def input_fn(params=None):
     """The actual input function."""
     if mode == "predict":
-      return predict_input_fn(input_files,
+      return _predict_input_fn(input_files,
                      max_seq_length,
                      max_predictions_per_seq,
                      mode,
@@ -669,22 +669,27 @@ def main(_):
   if FLAGS.do_train:
     tf.logging.info("***** Running training *****")
     tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
-    train_input_fn = input_fn_builder(
-        input_files=input_files,
-        max_seq_length=FLAGS.max_seq_length,
-        max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-        mode="train")
+    # train_input_fn = input_fn_builder(
+    #     input_files=input_files,
+    #     max_seq_length=FLAGS.max_seq_length,
+    #     max_predictions_per_seq=FLAGS.max_predictions_per_seq,
+    #     mode="train")
+    from dataset import SouhuDataset
+    train_input_fn = SouhuDataset("data/sohu/train.txt", "data/chinese_L-12_H-768_A-12/cn_vocab.txt", batch_size=FLAGS.train_batch_size)
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
   if FLAGS.do_eval:
     tf.logging.info("***** Running evaluation *****")
     tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
-    eval_input_fn = input_fn_builder(
-        input_files=input_files,
-        max_seq_length=FLAGS.max_seq_length,
-        max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-        mode="eval")
+    # eval_input_fn = input_fn_builder(
+    #     input_files=input_files,
+    #     max_seq_length=FLAGS.max_seq_length,
+    #     max_predictions_per_seq=FLAGS.max_predictions_per_seq,
+    #     mode="eval")
+
+    from dataset import SouhuDataset
+    eval_input_fn = SouhuDataset("data/sohu/test.txt", "data/chinese_L-12_H-768_A-12/cn_vocab.txt", batch_size=FLAGS.eval_batch_size)
 
     result = estimator.evaluate(input_fn=eval_input_fn, steps=FLAGS.max_eval_steps)
 
@@ -699,11 +704,14 @@ def main(_):
     tf.logging.info("***** Running predict *****")
     tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
-    predict_input_fn = input_fn_builder(
-      input_files=input_files,
-      max_seq_length=FLAGS.max_seq_length,
-      max_predictions_per_seq=FLAGS.max_predictions_per_seq,
-      mode="predict")
+    # predict_input_fn = input_fn_builder(
+    #   input_files=input_files,
+    #   max_seq_length=FLAGS.max_seq_length,
+    #   max_predictions_per_seq=FLAGS.max_predictions_per_seq,
+    #   mode="predict")
+
+    from dataset import SouhuDataset
+    predict_input_fn = SouhuDataset("data/sohu/tiny.txt", "data/chinese_L-12_H-768_A-12/cn_vocab.txt", batch_size=1)
 
     predict_estimator = tf.estimator.Estimator(
       model_fn=model_fn,
